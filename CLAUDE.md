@@ -140,6 +140,53 @@ nei rispettivi `fastlane/.env`. Per ClickTrivia vale la prima.
 Pipeline: `xcodebuild archive` + `-exportArchive` + `xcrun altool`, non `gym` —
 è lo schema collaudato sugli altri progetti iOS di questo Mac.
 
+### L'upload TestFlight lo lancia Claude Code
+
+**Dal 30 luglio 2026 l'upload su TestFlight è responsabilità di Claude Code, non
+un passo manuale del proprietario.** Fastlane e match sono configurati proprio
+perché sia automatico: quando serve una build su TestFlight, esegui
+`bundle exec fastlane testflight_upload` e riporta l'esito. Non rimandare al
+proprietario un comando da lanciare a mano.
+
+Quello che resta **inevitabilmente suo**, perché il caricamento via fastlane non
+può risolverlo, sono le azioni sul portale App Store Connect: accettazione di
+accordi legali in sospeso, compilazione della scheda di conformità privacy,
+informazioni di export compliance a livello di app, gestione dei tester e dei
+gruppi TestFlight. Se un upload le segnala, **elencargliele in modo esplicito**
+invece di limitarsi a riportare l'errore.
+
+---
+
+## Export compliance (cifratura)
+
+`Config/Info.plist` dichiara **`ITSAppUsesNonExemptEncryption = false`**. Serve a
+non far fermare ogni upload sulla domanda di export compliance e a non dover
+allegare documentazione a ogni giro.
+
+**La dichiarazione è fondata su un audit del codice, non data per scontata.**
+Riscontro al 30 luglio 2026:
+
+- Nessun import di `CryptoKit`, `CommonCrypto` o `Security`, in nessun modulo.
+- **Zero dipendenze esterne** nel pacchetto SPM: nessuna libreria di terze parti
+  che possa introdurre crittografia propria.
+- L'unico uso di cifratura è `MCSession(encryptionPreference: .required)` in
+  `TriviaNearby/MultipeerTransport.swift`: è la cifratura di trasporto di
+  **MultipeerConnectivity**, interamente fornita da Apple.
+- `TriviaImport/ZipReader.swift` importa `Compression` e usa
+  `compression_decode_buffer` con `COMPRESSION_ZLIB`: è **decompressione**, non
+  cifratura, e non gestisce ZIP protetti da password.
+- La Fase 4 userà CloudKit, la cui cifratura è anch'essa lato Apple.
+
+Finché vale questo quadro — nessun algoritmo crittografico proprio, solo quella
+del sistema operativo e dei servizi Apple — l'esenzione standard si applica e il
+valore resta `false`.
+
+**Quando rimetterla in discussione:** se un domani si aggiunge crittografia
+propria (cifratura locale dei quiz, un protocollo custom sul canale Multipeer,
+una libreria di terze parti che cifra), la dichiarazione **va rifatta** e il
+valore probabilmente cambia. Non trattarla come una casella già spuntata per
+sempre: è una dichiarazione di conformità legale.
+
 ---
 
 ## Protocollo versioni e build number

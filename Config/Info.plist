@@ -9,5 +9,12 @@
 		<string>_clicktrivia._tcp</string>
 		<string>_clicktrivia._udp</string>
 	</array>
+	<!-- Export compliance: l'app non implementa algoritmi crittografici propri e
+	     usa solo la cifratura fornita dal sistema operativo e dai servizi Apple
+	     (HTTPS, cifratura di trasporto di MultipeerConnectivity, CloudKit lato
+	     Apple). Rientra quindi nell'esenzione standard. Vedi CLAUDE.md,
+	     "Export compliance". -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>
