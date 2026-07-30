@@ -9,6 +9,12 @@
 		<string>_clicktrivia._tcp</string>
 		<string>_clicktrivia._udp</string>
 	</array>
+	<!-- Nome dell'app icon set nell'asset catalog. Va dichiarato esplicitamente:
+	     con INFOPLIST_FILE personalizzato il merge del plist parziale prodotto da
+	     actool non lo inietta, e senza questa chiave l'upload viene rifiutato
+	     (errore 90713). -->
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
 	<!-- Export compliance: l'app non implementa algoritmi crittografici propri e
 	     usa solo la cifratura fornita dal sistema operativo e dai servizi Apple
 	     (HTTPS, cifratura di trasporto di MultipeerConnectivity, CloudKit lato
