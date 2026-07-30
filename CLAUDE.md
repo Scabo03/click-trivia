@@ -280,6 +280,15 @@ Al 30 luglio 2026.
 - **Fase 3 in attesa di verifica su due dispositivi fisici reali.** Il trasporto
   Multipeer **non è testabile in simulatore**: finché la prova su device non è
   fatta e riportata, la fase non è chiusa.
+- **Icona app: segnaposto.** `App/Assets.xcassets/AppIcon.appiconset` conteneva
+  solo il `Contents.json` senza immagini, e Apple rifiutava l'upload (errori
+  90022, 90023, 90713). Ci sono ora tre PNG 1024×1024 (default, dark, tinted)
+  **derivati dai token di `TriviaDesign`** — fondo blu notte, fulmine in un
+  cerchio nell'accento — generati come tappabuchi per sbloccare TestFlight.
+  **Da sostituire con l'icona definitiva** quando il proprietario la fornisce:
+  basta rimpiazzare i tre file mantenendo i nomi. Nota tecnica: `CFBundleIconName`
+  è dichiarato a mano in `Config/Info.plist` perché con un `INFOPLIST_FILE`
+  personalizzato il merge del plist parziale di `actool` non lo inietta.
 - **Tarature manuali ancora aperte**, a carico del proprietario:
   - Fase 1 — suoni (`SynthesizedAudioChannel.tones(for:)`) e aptica
     (`CoreHapticsChannel`) da tarare su device reale.
