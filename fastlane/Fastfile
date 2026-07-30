@@ -1,7 +1,9 @@
 # Fastfile — ClickTrivia
 #
-# Due lane:
-#   • setup_signing     — inizializza / riallinea certificati e profilo via Match (appstore)
+# Quattro lane:
+#   • fetch_signing     — installa certificato e profilo esistenti (readonly). Default sicuro.
+#   • setup_signing     — crea/riallinea certificati e profilo via Match. ECCEZIONALE, vedi CLAUDE.md.
+#   • build_only        — archive + export firmati, senza upload. Verifica la firma.
 #   • testflight_upload — build, archive, export e upload TestFlight in un colpo solo
 #
 # La pipeline di build usa `xcodebuild` diretto (archive + export, senza
@@ -11,6 +13,7 @@
 
 require "fileutils"
 require "base64"
+require "spaceship"
 
 default_platform(:ios)
 
@@ -94,6 +97,59 @@ ensure
   ENV["APP_STORE_CONNECT_API_KEY_PATH"] = saved if saved
 end
 
+# ── Helper: prossimo build number ────────────────────────────────────────────
+# LA FONTE DI VERITÀ È APP STORE CONNECT, NON IL DISCO. Vedi CLAUDE.md
+# "Protocollo versioni e build number" — non sostituire con un contatore locale.
+#
+# Prende il build number più alto già esistente per questo app identifier su
+# TUTTI i version train e ci somma 1. Considerare tutti i train (e non solo
+# quello della marketing version corrente) evita che i numeri ripartano da capo
+# quando la marketing version cambia, cosa che Apple rifiuterebbe.
+#
+# Si contano anche i build in stato FAILED/INVALID: un numero già usato resta
+# bruciato anche se quel build non è mai diventato utilizzabile.
+#
+# Se la query fallisce la lane si FERMA: nessun fallback su un valore locale,
+# che tra una sessione e l'altra resta indietro e produce collisioni.
+def next_build_number
+  Spaceship::ConnectAPI.token = spaceship_token
+
+  app = Spaceship::ConnectAPI::App.find(APP_IDENTIFIER)
+  UI.user_error!("App #{APP_IDENTIFIER} non trovata su App Store Connect.") if app.nil?
+
+  builds  = Spaceship::ConnectAPI::Build.all(app_id: app.id)
+  highest = builds.map { |b| b.version.to_i }.max || 0
+
+  UI.message("Build number più alto su App Store Connect: #{highest} (#{builds.count} build totali)")
+  highest + 1
+rescue StandardError => e
+  UI.user_error!(
+    "Impossibile determinare il prossimo build number da App Store Connect: #{e.message}\n" \
+    "La lane si ferma di proposito: senza il numero remoto non si può garantire " \
+    "un build number più alto dell'ultimo accettato, e un fallback locale " \
+    "rischierebbe una collisione. Ripristina la connessione o le credenziali e riprova."
+  )
+end
+
+# Token Spaceship dalla stessa API key usata dalle altre lane.
+def spaceship_token
+  key_id    = ENV["APP_STORE_CONNECT_API_KEY_ID"]
+  issuer_id = ENV["APP_STORE_CONNECT_API_KEY_ISSUER_ID"]
+
+  if (content = ENV["APP_STORE_CONNECT_API_KEY_CONTENT"]) && !content.empty?
+    Spaceship::ConnectAPI::Token.create(
+      key_id:                key_id,
+      issuer_id:             issuer_id,
+      key:                   content,
+      is_key_content_base64: !content.include?("BEGIN PRIVATE KEY"),
+    )
+  else
+    path = File.expand_path(ENV["APP_STORE_CONNECT_API_KEY_PATH"] || "~/AuthKey.p8")
+    UI.user_error!("API key non trovata: #{path}") unless File.exist?(path)
+    Spaceship::ConnectAPI::Token.create(key_id: key_id, issuer_id: issuer_id, filepath: path)
+  end
+end
+
 platform :ios do
   # ── Lane: setup_signing ────────────────────────────────────────────────────
   # Crea (prima volta) o riallinea il provisioning profile App Store per
@@ -138,14 +194,25 @@ platform :ios do
     UI.success("Certificato e profilo installati in locale (nessuna rigenerazione)")
   end
 
+  # ── Lane: next_build ───────────────────────────────────────────────────────
+  # Diagnostica in sola lettura: stampa che build number userebbe il prossimo
+  # upload, senza costruire né caricare nulla.
+  desc "Mostra il build number che userebbe il prossimo upload (sola lettura)"
+  lane :next_build do
+    UI.success("Prossimo build number: #{next_build_number}")
+  end
+
   # ── Lane: build_only ───────────────────────────────────────────────────────
   # Archive + export firmati per l'App Store, senza upload. Utile per verificare
   # che la firma di distribuzione funzioni prima di pubblicare qualcosa.
   desc "Archive + export firmati App Store, senza upload"
   lane :build_only do
     fetch_signing
-    build_number = Time.now.to_i.to_s
-    archive_and_export(build_number: build_number)
+    # Nessun build number: l'IPA prodotto qui serve solo a verificare che la
+    # firma funzioni e non viene mai caricato, quindi resta il
+    # CURRENT_PROJECT_VERSION del progetto. Così la verifica locale non dipende
+    # dalla rete e non consuma una query ad App Store Connect.
+    archive_and_export
     UI.success("IPA firmato pronto in #{EXPORT_PATH} (nessun upload effettuato)")
   end
 
@@ -156,13 +223,10 @@ platform :ios do
     # 1. Certificati in sola lettura (devono già esistere nel repo certs).
     fetch_signing
 
-    # Build number monotòno crescente e SENZA stato committato: l'epoch Unix in
-    # secondi. È sempre più alto del precedente (niente rifiuti per "build già
-    # esistente"), ed essendo < 4_294_967_295 fino al 2106 è un singolo componente
-    # valido di CFBundleVersion (che nell'Info.plist è $(CURRENT_PROJECT_VERSION)).
+    # 2. Build number: massimo esistente su App Store Connect + 1.
     # NB: si ignora di proposito l'env condiviso SCABO_BUILD_NUMBER (valore fisso,
-    # romperebbe l'auto-incremento dal secondo upload).
-    build_number = Time.now.to_i.to_s
+    # romperebbe l'incremento dal secondo upload).
+    build_number = next_build_number.to_s
     UI.message("Build number di questo upload: #{build_number}")
 
     archive_and_export(build_number: build_number)
@@ -183,6 +247,8 @@ platform :ios do
 
   # ── Helper condiviso: archive + export ─────────────────────────────────────
   private_lane :archive_and_export do |options|
+    # build_number assente = non si sovrascrive CURRENT_PROJECT_VERSION e vale
+    # quello del progetto (caso build_only, che non carica nulla).
     build_number = options[:build_number]
 
     FileUtils.rm_rf(BUILD_DIR)
@@ -191,7 +257,11 @@ platform :ios do
     # Archive — xcodebuild diretto, niente -destination, piattaforma device.
     # Il progetto è SDKROOT=auto e dichiara anche macosx tra i SUPPORTED_PLATFORMS:
     # qui lo si restringe a iphoneos perché l'archivio deve essere iOS.
-    sh(
+    #
+    # Il build number si passa SOLO da riga di comando: il pbxproj non viene mai
+    # riscritto, così non resta a disco uno stato che la sessione dopo trova
+    # indietro rispetto ad App Store Connect.
+    archive_args = [
       "xcodebuild", "archive",
       "-project",       PROJECT_PATH,
       "-scheme",        SCHEME,
@@ -203,8 +273,10 @@ platform :ios do
       "CODE_SIGN_STYLE=Manual",
       "CODE_SIGN_IDENTITY=Apple Distribution",
       "PROVISIONING_PROFILE_SPECIFIER=#{PROFILE_NAME}",
-      "CURRENT_PROJECT_VERSION=#{build_number}",
-    )
+    ]
+    archive_args << "CURRENT_PROJECT_VERSION=#{build_number}" if build_number
+
+    sh(*archive_args)
 
     # Export dell'IPA firmato per l'App Store.
     export_plist = File.join(BUILD_DIR, "ExportOptions.plist")

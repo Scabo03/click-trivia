@@ -133,6 +133,7 @@ nei rispettivi `fastlane/.env`. Per ClickTrivia vale la prima.
 |---|---|
 | `fetch_signing` | Installa certificato e profilo esistenti (readonly). Default sicuro. |
 | `setup_signing` | Crea/riallinea il profilo (readonly false). **Eccezionale.** |
+| `next_build` | Stampa il build number del prossimo upload. Sola lettura, non costruisce nulla. |
 | `build_only` | Archive + export dell'IPA firmato, **senza upload**. Verifica la firma. |
 | `testflight_upload` | Build, archive, export e upload su TestFlight. |
 
@@ -205,18 +206,21 @@ due, toccare **entrambe** le configurazioni.
 Stato attuale verificato: `MARKETING_VERSION = 1.0` e `CURRENT_PROJECT_VERSION = 1`
 identici in Debug e Release.
 
-### ⚠️ Da allineare prima del primo upload
+### ✅ Allineamento completato (30 luglio 2026)
 
-Al 30 luglio 2026 il `Fastfile` calcola ancora il build number come **epoch Unix**
-(`Time.now.to_i`), schema ereditato da lumar-lounge. È monotòno crescente e non
-collide, ma produce numeri enormi (~1,78 miliardi) e **una volta caricato il primo
-build TestFlight con quello schema non si torna più indietro**: qualunque numero
-successivo dovrà essere ancora più alto, per sempre.
+Il `Fastfile` calcolava inizialmente il build number come **epoch Unix**
+(`Time.now.to_i`), schema ereditato da lumar-lounge: monotòno e senza collisioni,
+ma con numeri enormi (~1,78 miliardi) e irreversibili, perché dopo il primo upload
+ogni numero successivo deve restare ancora più alto, per sempre.
 
-Nessun build è ancora stato caricato (App Store Connect ne riporta **0**), quindi
-la finestra per passare alla regola qui sopra è aperta e il primo upload partirebbe
-pulito da **1**. **Sostituire il calcolo epoch con la query ad App Store Connect
-prima del primo `testflight_upload`.**
+Lo schema epoch è stato **abbandonato** approfittando della finestra ancora aperta
+(nessun build caricato). Ora `testflight_upload` usa l'helper `next_build_number`,
+che implementa la regola qui sopra. Verificato sul progetto reale: 0 build
+esistenti → prossimo build number **1**, e con credenziali non valide la lane si
+ferma con un errore esplicito senza ripiegare su nessun valore locale.
+
+Diagnostica: `bundle exec fastlane next_build` stampa il numero che userebbe il
+prossimo upload, in sola lettura, senza costruire né caricare nulla.
 
 ---
 
