@@ -1,0 +1,236 @@
+# Fastfile — ClickTrivia
+#
+# Due lane:
+#   • setup_signing     — inizializza / riallinea certificati e profilo via Match (appstore)
+#   • testflight_upload — build, archive, export e upload TestFlight in un colpo solo
+#
+# La pipeline di build usa `xcodebuild` diretto (archive + export, senza
+# -destination, piattaforma device forzata) e `xcrun altool` per l'upload: è la
+# pipeline collaudata sugli altri progetti iOS dell'utente. Non si usa gym() di
+# proposito, perché su progetti reali questo flusso si è dimostrato più affidabile.
+
+require "fileutils"
+require "base64"
+
+default_platform(:ios)
+
+# ── Config ────────────────────────────────────────────────────────────────────
+# Identità del progetto: FISSA, non da env. Le credenziali condivise vivono in un
+# file env multi-progetto (~/Developer/private_keys/scabo_deploy.env) che porta un
+# APP_IDENTIFIER / MATCH_GIT_URL di un ALTRO progetto: pinnandoli qui evitiamo che
+# match colpisca l'app o il repo certificati sbagliati.
+APP_IDENTIFIER = "com.scabo.click-trivia"
+# Repo certificati condiviso con Lumar Lounge: vedi la nota nel Matchfile: il
+# tetto di 3 certificati Apple Distribution dell'account è saturo, quindi si
+# riusa un certificato già archiviato invece di generarne un quarto.
+CERTS_GIT_URL  = "https://github.com/Scabo03/lumar-lounge-certs.git"
+# Valori a livello di account, condivisi tra i progetti: ok leggerli da env.
+TEAM_ID        = ENV["APPLE_TEAM_ID"] || "D2KQYQ8YU8"
+SCHEME         = "ClickTrivia"
+PROJECT_ROOT   = File.expand_path("..", __dir__)
+PROJECT_PATH   = File.join(PROJECT_ROOT, "ClickTrivia.xcodeproj")
+BUILD_DIR      = File.join(PROJECT_ROOT, "build")
+ARCHIVE_PATH   = File.join(BUILD_DIR, "ClickTrivia.xcarchive")
+EXPORT_PATH    = File.join(BUILD_DIR, "export")
+PROFILE_NAME   = "match AppStore #{APP_IDENTIFIER}"
+
+# ── Helper: App Store Connect API key ────────────────────────────────────────
+# Usa APP_STORE_CONNECT_API_KEY_CONTENT (contenuto del .p8, base64 o PEM) se
+# presente, altrimenti il file puntato da APP_STORE_CONNECT_API_KEY_PATH
+# (sulla macchina dell'utente: ~/Developer/private_keys/AuthKey_MGW9GC97HV.p8).
+# La chiave NON vive nel repo: si referenzia sempre per percorso esterno.
+def asc_api_key
+  key_id    = ENV["APP_STORE_CONNECT_API_KEY_ID"]
+  issuer_id = ENV["APP_STORE_CONNECT_API_KEY_ISSUER_ID"]
+
+  if (content = ENV["APP_STORE_CONNECT_API_KEY_CONTENT"]) && !content.empty?
+    app_store_connect_api_key(
+      key_id:                key_id,
+      issuer_id:             issuer_id,
+      key_content:           content,
+      is_key_content_base64: !content.include?("BEGIN PRIVATE KEY"),
+      in_house:              false,
+    )
+  else
+    path = File.expand_path(ENV["APP_STORE_CONNECT_API_KEY_PATH"] || "~/AuthKey.p8")
+    UI.user_error!("API key non trovata: #{path}. Imposta APP_STORE_CONNECT_API_KEY_PATH o APP_STORE_CONNECT_API_KEY_CONTENT.") unless File.exist?(path)
+    app_store_connect_api_key(
+      key_id:       key_id,
+      issuer_id:    issuer_id,
+      key_filepath: path,
+      in_house:     false,
+    )
+  end
+end
+
+# Materializza la .p8 dove `xcrun altool` la cerca:
+# ~/.appstoreconnect/private_keys/AuthKey_<KEYID>.p8
+def ensure_altool_key
+  key_id = ENV["APP_STORE_CONNECT_API_KEY_ID"]
+  dir    = File.expand_path("~/.appstoreconnect/private_keys")
+  FileUtils.mkdir_p(dir)
+  dest = File.join(dir, "AuthKey_#{key_id}.p8")
+  return dest if File.exist?(dest)
+
+  if (content = ENV["APP_STORE_CONNECT_API_KEY_CONTENT"]) && !content.empty?
+    data = content.include?("BEGIN PRIVATE KEY") ? content : Base64.decode64(content)
+    File.write(dest, data)
+  else
+    src = File.expand_path(ENV["APP_STORE_CONNECT_API_KEY_PATH"] || "~/AuthKey.p8")
+    UI.user_error!("API key non trovata: #{src}") unless File.exist?(src)
+    FileUtils.cp(src, dest)
+  end
+  dest
+end
+
+# match mappa automaticamente l'env APP_STORE_CONNECT_API_KEY_PATH sull'opzione
+# `api_key_path`, che va in conflitto con l'`api_key` (hash) che gli passiamo.
+# Togliamo temporaneamente quell'env attorno alla chiamata a match e la
+# ripristiniamo dopo (serve ad altool nello step di upload).
+def without_api_key_path_env
+  saved = ENV.delete("APP_STORE_CONNECT_API_KEY_PATH")
+  yield
+ensure
+  ENV["APP_STORE_CONNECT_API_KEY_PATH"] = saved if saved
+end
+
+platform :ios do
+  # ── Lane: setup_signing ────────────────────────────────────────────────────
+  # Crea (prima volta) o riallinea il provisioning profile App Store per
+  # com.scabo.click-trivia, riusando il certificato Distribution già presente in
+  # lumar-lounge-certs, e lo ripusha cifrato con MATCH_PASSWORD.
+  #
+  # Da eseguire UNA volta (o su una macchina nuova). L'uso quotidiano è readonly.
+  desc "Crea/riallinea il provisioning profile App Store via Match (readonly: false)"
+  lane :setup_signing do
+    api_key = asc_api_key
+    without_api_key_path_env do
+      match(
+        type:           "appstore",
+        app_identifier: APP_IDENTIFIER,
+        git_url:        CERTS_GIT_URL,
+        storage_mode:   "git",
+        team_id:        TEAM_ID,
+        api_key:        api_key,
+        readonly:       false,
+      )
+    end
+    UI.success("Profilo App Store per #{APP_IDENTIFIER} allineato su #{CERTS_GIT_URL}")
+  end
+
+  # ── Lane: fetch_signing ────────────────────────────────────────────────────
+  # Recupera e installa certificato + profilo SENZA rigenerare nulla.
+  # È la modalità sicura da usare di default e su macchine già configurate.
+  desc "Recupera e installa certificato e profilo esistenti (readonly)"
+  lane :fetch_signing do
+    api_key = asc_api_key
+    without_api_key_path_env do
+      match(
+        type:           "appstore",
+        app_identifier: APP_IDENTIFIER,
+        git_url:        CERTS_GIT_URL,
+        storage_mode:   "git",
+        team_id:        TEAM_ID,
+        api_key:        api_key,
+        readonly:       true,
+      )
+    end
+    UI.success("Certificato e profilo installati in locale (nessuna rigenerazione)")
+  end
+
+  # ── Lane: build_only ───────────────────────────────────────────────────────
+  # Archive + export firmati per l'App Store, senza upload. Utile per verificare
+  # che la firma di distribuzione funzioni prima di pubblicare qualcosa.
+  desc "Archive + export firmati App Store, senza upload"
+  lane :build_only do
+    fetch_signing
+    build_number = Time.now.to_i.to_s
+    archive_and_export(build_number: build_number)
+    UI.success("IPA firmato pronto in #{EXPORT_PATH} (nessun upload effettuato)")
+  end
+
+  # ── Lane: testflight_upload ────────────────────────────────────────────────
+  # Build → archive → export → upload TestFlight in un colpo solo.
+  desc "Build, archive, export e upload su TestFlight"
+  lane :testflight_upload do
+    # 1. Certificati in sola lettura (devono già esistere nel repo certs).
+    fetch_signing
+
+    # Build number monotòno crescente e SENZA stato committato: l'epoch Unix in
+    # secondi. È sempre più alto del precedente (niente rifiuti per "build già
+    # esistente"), ed essendo < 4_294_967_295 fino al 2106 è un singolo componente
+    # valido di CFBundleVersion (che nell'Info.plist è $(CURRENT_PROJECT_VERSION)).
+    # NB: si ignora di proposito l'env condiviso SCABO_BUILD_NUMBER (valore fisso,
+    # romperebbe l'auto-incremento dal secondo upload).
+    build_number = Time.now.to_i.to_s
+    UI.message("Build number di questo upload: #{build_number}")
+
+    archive_and_export(build_number: build_number)
+
+    # 4. Upload su TestFlight con altool + API Key.
+    ipa = Dir.glob(File.join(EXPORT_PATH, "*.ipa")).first
+    UI.user_error!("Nessun .ipa prodotto in #{EXPORT_PATH}") unless ipa
+    ensure_altool_key
+    sh(
+      "xcrun", "altool", "--upload-app",
+      "-f", ipa,
+      "-t", "ios",
+      "--apiKey",    ENV["APP_STORE_CONNECT_API_KEY_ID"],
+      "--apiIssuer", ENV["APP_STORE_CONNECT_API_KEY_ISSUER_ID"],
+    )
+    UI.success("Upload TestFlight completato: #{File.basename(ipa)}")
+  end
+
+  # ── Helper condiviso: archive + export ─────────────────────────────────────
+  private_lane :archive_and_export do |options|
+    build_number = options[:build_number]
+
+    FileUtils.rm_rf(BUILD_DIR)
+    FileUtils.mkdir_p(BUILD_DIR)
+
+    # Archive — xcodebuild diretto, niente -destination, piattaforma device.
+    # Il progetto è SDKROOT=auto e dichiara anche macosx tra i SUPPORTED_PLATFORMS:
+    # qui lo si restringe a iphoneos perché l'archivio deve essere iOS.
+    sh(
+      "xcodebuild", "archive",
+      "-project",       PROJECT_PATH,
+      "-scheme",        SCHEME,
+      "-configuration", "Release",
+      "-archivePath",   ARCHIVE_PATH,
+      "SUPPORTED_PLATFORMS=iphoneos",
+      "SUPPORTS_MACCATALYST=NO",
+      "DEVELOPMENT_TEAM=#{TEAM_ID}",
+      "CODE_SIGN_STYLE=Manual",
+      "CODE_SIGN_IDENTITY=Apple Distribution",
+      "PROVISIONING_PROFILE_SPECIFIER=#{PROFILE_NAME}",
+      "CURRENT_PROJECT_VERSION=#{build_number}",
+    )
+
+    # Export dell'IPA firmato per l'App Store.
+    export_plist = File.join(BUILD_DIR, "ExportOptions.plist")
+    File.write(export_plist, <<~PLIST)
+      <?xml version="1.0" encoding="UTF-8"?>
+      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      <plist version="1.0">
+      <dict>
+        <key>method</key><string>app-store</string>
+        <key>teamID</key><string>#{TEAM_ID}</string>
+        <key>signingStyle</key><string>manual</string>
+        <key>provisioningProfiles</key>
+        <dict>
+          <key>#{APP_IDENTIFIER}</key><string>#{PROFILE_NAME}</string>
+        </dict>
+        <key>uploadSymbols</key><true/>
+        <key>destination</key><string>export</string>
+      </dict>
+      </plist>
+    PLIST
+
+    sh(
+      "xcodebuild", "-exportArchive",
+      "-archivePath",        ARCHIVE_PATH,
+      "-exportPath",         EXPORT_PATH,
+      "-exportOptionsPlist", export_plist,
+    )
+  end
+end

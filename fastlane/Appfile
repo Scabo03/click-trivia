@@ -1,0 +1,11 @@
+# Parametri Apple del progetto ClickTrivia.
+# app_identifier è FISSO: definisce *questo* progetto e non va letto da env, per
+# non farsi sovrascrivere da un file di credenziali multi-progetto sourcato
+# (~/Developer/private_keys/scabo_deploy.env porta l'identifier di scabopdf).
+# apple_id e team_id sono a livello di account (condivisi) e accettano override.
+
+app_identifier("com.scabo.click-trivia")
+apple_id(ENV["APPLE_ID"]     || "scabo@icloud.com")
+team_id(ENV["APPLE_TEAM_ID"] || "D2KQYQ8YU8")
+
+xcodeproj("ClickTrivia.xcodeproj")

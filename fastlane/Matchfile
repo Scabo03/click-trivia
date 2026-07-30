@@ -1,0 +1,23 @@
+# Configurazione di default per `fastlane match`.
+# Permette di invocare `fastlane match appstore` anche senza passare dal Fastfile.
+#
+# git_url FISSO: non da env, per non puntare al repo certificati di un altro
+# progetto quando si sourca un file di credenziali condiviso.
+#
+# NB: il repo certificati è condiviso con Lumar Lounge di proposito. L'account
+# Apple ha già saturato il tetto di 3 certificati Apple Distribution (uno per
+# ciascuno di lumar-lounge-certs, elenthyr-certs, sense-racing-certs): puntando
+# qui, match riusa il certificato Distribution già archiviato e si limita a
+# creare il provisioning profile nuovo per com.scabo.click-trivia, senza
+# generare né revocare certificati.
+git_url("https://github.com/Scabo03/lumar-lounge-certs.git")
+storage_mode("git")
+
+type("appstore")
+app_identifier(["com.scabo.click-trivia"])
+username(ENV["APPLE_ID"]     || "scabo@icloud.com")
+team_id(ENV["APPLE_TEAM_ID"] || "D2KQYQ8YU8")
+
+# readonly: non rigenerare certificati esistenti. La creazione iniziale del
+# profilo va fatta UNA volta con `bundle exec fastlane setup_signing`.
+readonly(true)
